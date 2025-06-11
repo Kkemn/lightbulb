@@ -16,6 +16,7 @@ class Application(Tk):
         self.bulb = Bulb(BULB_IP)
         self.title("Yeelight Bulb Manager")
         self.create_widgets()
+        self.bind(sequence="<Escape>", func=self.exit)
     
     def create_widgets(self):
         # Create mainframe
@@ -49,10 +50,10 @@ class Application(Tk):
         ttk.Label(self.mainframe, textvariable=self.sunset).grid(column=1, row=3)
 
         # Auto-on at sunset checkbutton
-        self.auto_on_check: ttk.Checkbutton = ttk.Checkbutton(self.mainframe, text="Auto-On at sunset", command=self.sunset_turn_on)
+        self.auto_on_check: ttk.Checkbutton = ttk.Checkbutton(self.mainframe, text="Auto-on at sunset", command=self.sunset_turn_on)
         self.auto_on_check.grid(column=0, row=4)
 
-        # Time offset widget
+        # Auto-on time offset spinbox
         ttk.Label(self.mainframe, text="Set time offset:").grid(column=0, row=5)
         self.offset = StringVar()
         self.offset.set("0")
@@ -60,9 +61,33 @@ class Application(Tk):
         self.spnbox.state(["readonly"])
         if not self.auto_on_check.instate(["selected"]):
             self.spnbox.state(["disabled"])
-        self.spnbox.grid(column=0, row=6, sticky='e')
-        ttk.Label(self.mainframe, text="minutes").grid(column=1, row=6, sticky='w')
+        self.spnbox.grid(column=1, row=5)
+        ttk.Label(self.mainframe, text="minutes").grid(column=2, row=5, sticky='w')
 
+        # Auto-off checkbutton
+        self.auto_off_check = ttk.Checkbutton(self.mainframe, text="Auto-off", command=self.auto_off)
+        self.auto_off_check.grid(column=0, row=7)
+
+        # Auto-off time combobox
+        ttk.Label(self.mainframe, text="Set auto-off time:").grid(column=0, row=8)
+        self.off_time = StringVar()
+        self.off_time.set("00:00")
+        self.cmbbox = ttk.Combobox(self.mainframe, textvariable=self.off_time, width=5)
+        self.cmbbox["values"] = [
+                            str(h)+":0"+str(m)
+                            if m < 10
+                            else
+                            str(h)+":"+str(m)
+                            for h in range(24)
+                            for m in range(60)
+                            ]
+        self.cmbbox.state(["readonly"])
+        if not self.auto_off_check.instate(["selected"]):
+            self.cmbbox.state(["disabled"])
+        self.cmbbox.grid(column=1, row=8)
+
+        # Exit button
+        ttk.Button(self.mainframe, text="Exit", command=self.exit).grid(column=2, row=9)
 
     def toggle_bulb(self):
         self.bulb.toggle()
@@ -79,12 +104,8 @@ class Application(Tk):
             print("Sunset turn on enabled.")
             self.calculate_turn_on_time()
             self.sunset_turn_on_loop()
-            # if self.sunset.get() == self.time.get():
-            #     if self.bulb_state.get() == "off":
-            #         self.bulb.turn_on()
-            #         self.bulb_state.set(self.bulb.get_properties()["power"])
-            # self.after(1000, self.sunset_turn_on)
         else:
+            self.spnbox.state(["disabled"])
             print("Sunset turn on disabled.")
     
     def sunset_turn_on_loop(self):
@@ -116,6 +137,27 @@ class Application(Tk):
     def time_update(self):
         self.time.set(datetime.now().strftime("%H:%M"))
         self.after(1000, self.time_update)
+    
+    def auto_off(self):
+        if self.auto_off_check.instate(["selected"]):
+            self.cmbbox.state(["!disabled"])
+            print("Auto turn-off enabled.")
+            self.auto_off_loop()
+        else:
+            self.cmbbox.state(["disabled"])
+            print("Auto turn-off disabled.")
+    
+    def auto_off_loop(self):
+        if self.off_time.get() == self.time.get():
+                if self.bulb_state.get() == "on":
+                    self.bulb.turn_off()
+                    self.bulb_state.set(self.bulb.get_properties()["power"])
+                    print("Bulb turned off.")
+        if self.auto_off_check.instate(["selected"]):
+            self.after(1000, self.auto_off_loop)
+    
+    def exit(self, *args):
+        self.destroy()
 
 if __name__ == '__main__':
     app = Application()
