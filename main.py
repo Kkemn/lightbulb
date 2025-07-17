@@ -1,7 +1,7 @@
-from yeelight import Bulb
+from yeelight import Bulb, BulbException
 from datetime import datetime, timedelta, time
 from collections.abc import Callable
-from typing import cast
+from typing import cast, Literal
 import requests
 from tkinter import *
 from tkinter import Misc, ttk
@@ -86,38 +86,79 @@ class LoopController:
         ''' Check if the loop is running. '''
         return self._loop_id is not None
     
+class ConfigManager:
+    def __init__(self, path = "config.json") -> None:
+        self.path: str = path
+
+    def save(self, config_data) -> None:
+        with open(self.path, "w") as file:
+            json.dump(config_data, file)
+
+        print("Configuration saved.")
+
+    def load(self) -> dict[str, str | int]:
+        if os.path.exists(self.path):
+            with open(self.path, "r") as file:
+                return json.load(file)
+        else:
+            print("Config file not found. Loading defaults.")
+            return {}
+        
+class BulbController:
+    def __init__(self, ip: str) -> None:
+        ''' Init the bulb with passed IP address. '''
+        self.ip: str = ip
+        self.bulb: Bulb = Bulb(self.ip)
+        self.check_bulb()
+        self.power_state: str = self.get_power_state()
+
+    def toggle(self) -> None:
+        ''' Toggle the bulb and return it's power state. '''
+        self.bulb.toggle()
+        self.power_state = self.get_power_state()
+
+    def turn_on(self) -> None:
+        ''' Turn the bulb on (if it's off). '''
+        if self.power_state == "off":
+            self.bulb.turn_on()
+            self.power_state = "on"
+
+    def turn_off(self) -> None:
+        ''' Turn the bulb off (if it's on). '''
+        if self.power_state == "on":
+            self.bulb.turn_off()
+            self.power_state = "off"
+
+    def get_power_state(self) -> str:
+        ''' Return bulb's power state. '''
+        return self.bulb.get_properties()["power"]
+    
+    def check_bulb(self) -> None:
+        ''' Check if the bulb is reachable. '''
+        try:
+            self.bulb.get_properties()
+        except BulbException as e:
+            raise ConnectionError(f"Failed to connect the bulb at {self.ip}.") from e
+
 class App(Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Yeelight Bulb Manager")
-        config_data: dict[str, str | int] = self.load_config()
-        self.bulb: Bulb = Bulb(config_data.get("bulb_ip", BULB_IP))
-        self.latitude: str = str(config_data.get("latitude", LATITUDE))
-        self.longitude: str = str(config_data.get("longitude", LONGITUDE))
-        self.location = StringVar(value=str(config_data.get("location", LOCATION)))
-        self.auto_on_var = IntVar(value=int(config_data.get("auto_on_var", 0)))
-        self.offset = StringVar(value=str(config_data.get("offset", "0")))
-        self.auto_off_var = IntVar(value=int(config_data.get("auto_off_var", 0)))
-        self.off_time = StringVar(value=str(config_data.get("off_time", "00:00")))
-        self.exit_var = IntVar(value=int(config_data.get("exit_var", 0)))
+        self.title("Yeelight Bulb Controller")
 
-        self.http = HttpRequests()
-        self.turn_on_loop: LoopController | None = None
-        self.turn_off_loop: LoopController | None = None
-        self.vcmd = (self.register(self.validate), "%P")
-        self.errmsg = StringVar()
+        self._init_external() 
+        # self.config_data: dict[str, str | int] = self.config.load()     
+        self._init_location_variables()  
+        self._init_images()      
+        self._init_state_variables()              
+        self._bind_keys()        
         self.create_widgets()
-        self.bind(sequence="<Escape>", func=self.exit)
-    
+            
     def create_widgets(self) -> None:
         # Create mainframe
         self.mainframe = ttk.Frame(self, padding="5")
         self.mainframe.grid(column=0, row=0, sticky="n s e w")
 
-        # Bulb state image label
-        self.bulb_state = StringVar()
-        self.img_bulb_on = PhotoImage(file="bulb_on.gif")
-        self.img_bulb_off = PhotoImage(file="bulb_off.gif")
+        # Bulb state image label  
         self.state_label = ttk.Label(self.mainframe, textvariable=self.bulb_state)
         self.state_label.grid(column=0, row=0, rowspan=3)
         self.set_bulb_state()
@@ -126,8 +167,6 @@ class App(Tk):
         ttk.Button(self.mainframe, text="Toggle", command=self.toggle_bulb).grid(column=1, row=1)
 
         # Time text label
-        self.time = StringVar()
-        self.time_update()
         ttk.Label(self.mainframe, text="Time:").grid(column=3, row=0, sticky="s")
         ttk.Label(self.mainframe, textvariable=self.time).grid(column=4, row=0, sticky="w s")
 
@@ -136,7 +175,6 @@ class App(Tk):
         ttk.Label(self.mainframe, textvariable=self.location).grid(column=4, row=1, sticky="w")
 
         # Sunset time text label
-        self.sunset = StringVar(value=self.http.get_sunset(self.latitude, self.longitude))
         ttk.Label(self.mainframe, text="Sunset at location:").grid(column=3, row=2, sticky="n")
         ttk.Label(self.mainframe, textvariable=self.sunset).grid(column=4, row=2, sticky="w n")
 
@@ -208,12 +246,64 @@ class App(Tk):
 
         # Exit button
         ttk.Button(self.mainframe, text="Exit", command=self.exit).grid(column=4, row=14)
+    
+    def _init_location_variables(self) -> None:
+        self.latitude: str = str(self.config_data.get("latitude", LATITUDE)) # add this to location_config dataclass
+        self.longitude: str = str(self.config_data.get("longitude", LONGITUDE)) # add this to location_config dataclass
+        self.location = StringVar(value=str(self.config_data.get("location", LOCATION))) # add this to location_config dataclass
+        self.sunset = StringVar(value=self.http.get_sunset(self.latitude, self.longitude))
 
+    def _init_state_variables(self) -> None:
+        # Bulb state
+        self.bulb_state = StringVar()
+
+        # Time
+        self.time = StringVar()
+        self.time_update()
+        
+        # Sunset auto-on
+        self.auto_on_var = IntVar(value=int(self.config_data.get("auto_on_var", 0))) # app_config dataclass maybe?
+        self.offset = StringVar(value=str(self.config_data.get("offset", "0"))) # app_config dataclass maybe?
+
+        # Auto-off
+        self.auto_off_var = IntVar(value=int(self.config_data.get("auto_off_var", 0))) # app_config dataclass maybe?
+        self.off_time = StringVar(value=str(self.config_data.get("off_time", "00:00"))) # app_config dataclass maybe?
+
+        # Exit behavior
+        self.exit_var = IntVar(value=int(self.config_data.get("exit_var", 0))) # app_config dataclass maybe?
+
+        # Validation and errors
+        self.vcmd: tuple[str, Literal['%P']] = (self.register(self.validate), "%P")
+        self.errmsg = StringVar()
+    
+    def _init_external(self) -> None:
+        # Configuration manager
+        self.config = ConfigManager()
+        self.config_data: dict[str, str | int] = self.config.load()
+        
+        # Bulb controller
+        self.bulb = BulbController(str(self.config_data.get("bulb_ip", BULB_IP)))
+
+        # Http requests handler
+        self.http = HttpRequests()
+
+        # Loops controller
+        self.turn_on_loop: LoopController | None = None
+        self.turn_off_loop: LoopController | None = None
+    
+    def _bind_keys(self) -> None:
+        self.bind(sequence="<Escape>", func=self.exit)
+
+    def _init_images(self) -> None:
+        self.img_bulb_on = PhotoImage(file="bulb_on.gif")
+        self.img_bulb_off = PhotoImage(file="bulb_off.gif")
+    
     def toggle_bulb(self) -> None:
         self.bulb.toggle()
         self.set_bulb_state()
     
     def sunset_turn_on(self) -> None:
+        ''' Start the turn on loop and calculate turn on time when auto-on at sunset is checked, stop the loop if auto-on at sunset gets unchecked. '''
         if not self.turn_on_loop:
             self.turn_on_loop = LoopController(self, 1000, self.turn_on_task)
 
@@ -228,12 +318,14 @@ class App(Tk):
             print("Sunset turn on disabled.")
     
     def turn_on_task(self) -> None:
+        ''' Turn on the bulb if current time matches scheduled time. '''
         if datetime.strptime(self.turn_on_time, "%H:%M").time() <= datetime.now().time():
             if self.bulb_state.get() == "off":
                 self.bulb.turn_on()
                 self.set_bulb_state()
                 if self.turn_on_loop:
                     self.turn_on_loop.stop()
+                    self.turn_on_loop = None
                 print("Bulb turned on.")
 
     def time_update(self) -> None:
@@ -256,15 +348,13 @@ class App(Tk):
             print("Auto turn-off disabled.")
     
     def turn_off_task(self) -> None:
-        print("Scheduled time:", self.turn_off_time)
-        print("Now:", datetime.now())
-        print(self.turn_off_time <= datetime.now())
         if self.turn_off_time <= datetime.now():
             if self.bulb_state.get() == "on":
                 self.bulb.turn_off()
                 self.set_bulb_state()
                 if self.turn_off_loop:
                     self.turn_off_loop.stop()
+                    self.turn_off_loop = None
                 print("Bulb turned off.")
     
     def exit(self, *args) -> None:
@@ -273,7 +363,7 @@ class App(Tk):
         self.destroy()
 
     def set_bulb_state(self) -> None:
-        self.bulb_state.set(self.bulb.get_properties()["power"])
+        self.bulb_state.set(self.bulb.power_state)
         if self.bulb_state.get() == "on":
             self.state_label["image"] = self.img_bulb_on
         else:
@@ -291,7 +381,7 @@ class App(Tk):
         
     def validate(self, new_entry: str) -> bool:
         self.errmsg.set("")
-        valid = new_entry.isalpha() or new_entry == ""
+        valid: bool = new_entry.isalpha() or new_entry == ""
         self.loc_btn.state(["!disabled"]) if valid else self.loc_btn.state(["disabled"])
         if valid:
             return valid
@@ -317,19 +407,8 @@ class App(Tk):
             "exit_var": self.exit_var.get()
         }
 
-        with open("config.json", "w") as file:
-            json.dump(config_data, file)
+        self.config.save(config_data)
 
-        print("Configuration saved.")
-
-    def load_config(self) -> dict[str, str | int]:
-        if os.path.exists("config.json"):
-            with open("config.json", "r") as file:
-                config_data: dict[str, str | int] = json.load(file)
-            return config_data
-        else:
-            print("Config file not found. Loading defaults.")
-            return {}
         
 if __name__ == '__main__':
     app = App()
